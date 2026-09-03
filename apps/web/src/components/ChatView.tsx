@@ -13,7 +13,6 @@ import {
   type PreviewAnnotationPayload,
   ProviderInstanceId,
   type ServerProvider,
-  type ServerProviderSkill,
   type ResolvedKeybindingsConfig,
   type ScopedThreadRef,
   type ThreadId,
@@ -280,7 +279,7 @@ import {
   requestOlderThreadTurns,
   threadHasOlderTurns,
 } from "@t3tools/client-runtime/state/threads";
-import { resolveProviderSkillsForCwd } from "@t3tools/client-runtime/providerSkills";
+import { resolveProviderSkillsForCwdAcrossProviders } from "@t3tools/client-runtime/providerSkills";
 import { vcsEnvironment } from "../state/vcs";
 import { useEnvironments, usePrimaryEnvironment } from "../state/environments";
 import {
@@ -2962,16 +2961,8 @@ function ChatViewContent(props: ChatViewProps) {
     return providerStatuses.find((status) => status.instanceId === defaultInstanceId) ?? null;
   }, [activeProviderInstanceId, providerStatuses, selectedProvider]);
   const timelineSkills = useMemo(() => {
-    const map = new Map<string, ServerProviderSkill>();
-    for (const provider of providerStatuses) {
-      const skills = resolveProviderSkillsForCwd(provider, gitCwd);
-      for (const skill of skills) {
-        if (!map.has(skill.name)) {
-          map.set(skill.name, skill);
-        }
-      }
-    }
-    return map.size > 0 ? Array.from(map.values()) : EMPTY_PROVIDER_SKILLS;
+    const skills = resolveProviderSkillsForCwdAcrossProviders(providerStatuses, gitCwd);
+    return skills.length > 0 ? skills : EMPTY_PROVIDER_SKILLS;
   }, [providerStatuses, gitCwd]);
   const [resumeCompactionPermanentlyDismissed, setResumeCompactionPermanentlyDismissed] =
     useLocalStorage(

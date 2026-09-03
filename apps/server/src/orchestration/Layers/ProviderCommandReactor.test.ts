@@ -169,6 +169,10 @@ describe("ProviderCommandReactor", () => {
     readonly serverActivation?: Effect.Effect<void>;
     readonly interruptTurnEffect?: () => Effect.Effect<void, ProviderAdapterRequestError>;
     readonly stopSessionEffect?: () => Effect.Effect<void, ProviderAdapterRequestError>;
+    readonly sendTurnEffect?: () => Effect.Effect<
+      { readonly threadId: ThreadId; readonly turnId: TurnId },
+      ProviderAdapterRequestError
+    >;
     readonly startSessionEffect?: (
       session: ProviderSession,
     ) => Effect.Effect<ProviderSession, ProviderAdapterRequestError>;
@@ -248,11 +252,13 @@ describe("ProviderCommandReactor", () => {
         ),
       );
     });
-    const sendTurn = vi.fn((_: unknown) =>
-      Effect.succeed({
-        threadId: ThreadId.make("thread-1"),
-        turnId: asTurnId("turn-1"),
-      }),
+    const sendTurn = vi.fn(
+      (_: unknown) =>
+        input?.sendTurnEffect?.() ??
+        Effect.succeed({
+          threadId: ThreadId.make("thread-1"),
+          turnId: asTurnId("turn-1"),
+        }),
     );
     const interruptTurn = vi.fn((_: unknown) => input?.interruptTurnEffect?.() ?? Effect.void);
     const respondToRequest = vi.fn<ProviderServiceShape["respondToRequest"]>(() => Effect.void);
@@ -2504,8 +2510,16 @@ describe("ProviderCommandReactor", () => {
         message: {
           messageId: asMessageId("user-message-provider-switch-1"),
           role: "user",
-          text: "first",
-          attachments: [],
+          text: "$caveman",
+          attachments: [
+            {
+              type: "file",
+              id: "provider-switch-context-file",
+              name: "investigation.md",
+              mimeType: "text/markdown",
+              sizeBytes: 128,
+            },
+          ],
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
         runtimeMode: "approval-required",
@@ -2515,7 +2529,7 @@ describe("ProviderCommandReactor", () => {
 
     await waitFor(() => harness.startSession.mock.calls.length === 1);
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
-    expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({ input: "first" });
+    expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({ input: "$caveman" });
 
     await Effect.runPromise(
       harness.engine.dispatch({
@@ -2573,7 +2587,8 @@ describe("ProviderCommandReactor", () => {
       model: "claude-opus-4-6",
     });
     expect(secondTurnInput?.input).toContain("[Thread Continuity Context]");
-    expect(secondTurnInput?.input).toContain("User: first");
+    expect(secondTurnInput?.input).toContain("User: \\$caveman");
+    expect(secondTurnInput?.input).not.toContain("User: $caveman");
     expect(secondTurnInput?.input).toContain(
       "Assistant: I found stale state in the session binding.",
     );
@@ -2582,6 +2597,15 @@ describe("ProviderCommandReactor", () => {
     expect(secondTurnInput?.input).not.toContain("Codex");
     expect(secondTurnInput?.input).not.toContain("Claude");
     expect(secondTurnInput?.input).not.toContain("previous agent");
+    expect(
+      (secondTurnInput as { attachments?: ReadonlyArray<{ id: string }> } | undefined)?.attachments,
+    ).toEqual([
+      expect.objectContaining({
+        id: "provider-switch-context-file",
+        name: "investigation.md",
+      }),
+    ]);
+    expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({ resumeCursor: null });
 
     const readModel = await harness.readModel();
     const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
@@ -2591,6 +2615,98 @@ describe("ProviderCommandReactor", () => {
     expect(
       thread?.activities.find((activity) => activity.kind === "provider.turn.start.failed"),
     ).toBeUndefined();
+  });
+
+  it("retries provider continuity context after a failed switched-provider turn", async () => {
+    let sendCount = 0;
+    const harness = await createHarness({
+      sendTurnEffect: () => {
+        sendCount += 1;
+        return sendCount === 2
+          ? Effect.fail(
+              new ProviderAdapterRequestError({
+                provider: "claudeAgent",
+                method: "thread.turn.start",
+                detail: "simulated switched-provider failure",
+              }),
+            )
+          : Effect.succeed({
+              threadId: ThreadId.make("thread-1"),
+              turnId: asTurnId(`turn-${sendCount}`),
+            });
+      },
+    });
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-continuity-retry-first"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("message-continuity-retry-first"),
+          role: "user",
+          text: "inspect session state",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-continuity-retry-switch"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("message-continuity-retry-switch"),
+          role: "user",
+          text: "continue inspection",
+          attachments: [],
+        },
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          model: "claude-opus-4-6",
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+    await waitFor(async () => {
+      const readModel = await harness.readModel();
+      const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+      return (
+        thread?.activities.some((activity) => activity.kind === "provider.turn.start.failed") ??
+        false
+      );
+    });
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-continuity-retry-third"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("message-continuity-retry-third"),
+          role: "user",
+          text: "retry",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+    await waitFor(() => harness.sendTurn.mock.calls.length === 3);
+
+    const retryInput = harness.sendTurn.mock.calls[2]?.[0] as { input?: string } | undefined;
+    expect(retryInput?.input).toContain("[Thread Continuity Context]");
+    expect(retryInput?.input).toContain("User: inspect session state");
+    expect(retryInput?.input).toContain("Current Request:\nretry");
   });
 
   it("switches providers after an existing thread session has stopped", async () => {
