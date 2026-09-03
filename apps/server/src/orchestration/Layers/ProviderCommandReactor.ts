@@ -626,10 +626,6 @@ const make = Effect.gen(function* () {
       requestedModelSelection.instanceId !== currentInstanceId &&
       (isDriverChanged || isContinuationIncompatible);
 
-    if (isHandoffSwitch) {
-      threadContinuityPending.add(threadId);
-    }
-
     if (
       options?.pendingTurnStart === true &&
       (thread.session?.status !== "running" || isHandoffSwitch)
@@ -667,6 +663,14 @@ const make = Effect.gen(function* () {
         requestedModelSelection,
       });
     }
+
+    // Marked only once the switch is accepted: a rejected model change leaves the
+    // session on its current provider, and a stale flag would synthesize continuity
+    // context into the next ordinary turn.
+    if (isHandoffSwitch) {
+      threadContinuityPending.add(threadId);
+    }
+
     const project = yield* resolveProject(thread.projectId);
     const effectiveCwd = resolveThreadWorkspaceCwd({
       thread,
@@ -987,7 +991,6 @@ const make = Effect.gen(function* () {
       });
       if (continuityContext.length > 0) {
         continuityContextIncluded = true;
-        threadContinuityPending.delete(input.threadId);
         effectiveInput = normalizedInput
           ? `${continuityContext}${CURRENT_REQUEST_PREFIX}${normalizedInput}`
           : continuityContext;
@@ -995,8 +998,6 @@ const make = Effect.gen(function* () {
           ...collectThreadContinuityAttachments(priorMessages, normalizedAttachments),
           ...normalizedAttachments,
         ];
-      } else {
-        threadContinuityPending.delete(input.threadId);
       }
     }
 
@@ -1027,6 +1028,14 @@ const make = Effect.gen(function* () {
             }
           : requestedModelSelection
         : input.modelSelection;
+
+    // Consumed only after every fallible step above. Clearing it as soon as the
+    // handoff prompt was built lost the conversation history whenever listSessions
+    // or getCapabilities failed: the session is already bound to the new provider,
+    // so the retry no longer looks like a handoff and nothing would carry it over.
+    if (needsContinuityContext) {
+      threadContinuityPending.delete(input.threadId);
+    }
 
     return {
       request: {
