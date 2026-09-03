@@ -2,6 +2,7 @@ import {
   type ChatAttachment,
   CommandId,
   EventId,
+  type MessageId,
   type ModelSelection,
   type OrchestrationEvent,
   type OrchestrationMessage,
@@ -758,7 +759,7 @@ const make = Effect.gen(function* () {
 
       const resumeCursor =
         shouldRestartForModelChange || shouldRestartForHandoff
-          ? undefined
+          ? null
           : (activeSession?.resumeCursor ?? undefined);
       yield* Effect.logInfo("provider command reactor restarting provider session", {
         threadId,
@@ -795,7 +796,9 @@ const make = Effect.gen(function* () {
       return restartedSession.threadId;
     }
 
-    const startedSession = yield* startProviderSession(undefined);
+    const startedSession = yield* startProviderSession(
+      isHandoffSwitch ? { resumeCursor: null } : undefined,
+    );
     yield* bindSessionToThread(startedSession);
     return startedSession.threadId;
   });
@@ -804,13 +807,16 @@ const make = Effect.gen(function* () {
     readonly previousProviderLabel: string;
     readonly newProviderLabel: string;
     readonly messages: ReadonlyArray<OrchestrationMessage>;
-    readonly currentMessageText?: string;
+    readonly currentMessageId?: MessageId | undefined;
+    readonly currentMessageText?: string | undefined;
   }): string => {
     let priorMessages = input.messages.filter(
       (entry) => entry.role === "user" || entry.role === "assistant",
     );
 
-    if (
+    if (input.currentMessageId !== undefined) {
+      priorMessages = priorMessages.filter((entry) => entry.id !== input.currentMessageId);
+    } else if (
       input.currentMessageText !== undefined &&
       priorMessages.length > 0 &&
       priorMessages[priorMessages.length - 1]?.role === "user" &&
@@ -830,14 +836,46 @@ const make = Effect.gen(function* () {
     ];
 
     const MAX_MESSAGE_CHARS = 4000;
+    const MAX_TOTAL_HANDOFF_CHARS = 60_000;
+    const messageBlocks: string[] = [];
+
     for (const msg of priorMessages) {
-      const roleLabel = msg.role === "user" ? "User" : input.previousProviderLabel;
+      const roleLabel = msg.role === "user" ? "User" : `Assistant (${input.previousProviderLabel})`;
       let text = assistantCitationsToPlainText(msg.text).trim();
+      const attachmentNames = (msg.attachments ?? []).map((a) => a.name).filter(Boolean);
+      const attachmentSummary =
+        attachmentNames.length > 0 ? `\n[Attachments: ${attachmentNames.join(", ")}]` : "";
       if (text.length > MAX_MESSAGE_CHARS) {
         text = text.slice(0, MAX_MESSAGE_CHARS) + " ...[truncated]";
       }
-      if (text.length > 0) {
-        parts.push(`${roleLabel}: ${text}`);
+      const separator = text.includes("\n") ? ":\n" : ": ";
+      if (text.length > 0 || attachmentSummary.length > 0) {
+        messageBlocks.push(`${roleLabel}${separator}${text}${attachmentSummary}`.trim());
+      }
+    }
+
+    if (messageBlocks.length > 0) {
+      const totalLength = messageBlocks.reduce((acc, b) => acc + b.length + 2, 0);
+      if (totalLength > MAX_TOTAL_HANDOFF_CHARS) {
+        const firstBlock = messageBlocks[0];
+        const recentBlocks: string[] = [];
+        let remainingBudget = MAX_TOTAL_HANDOFF_CHARS - (firstBlock?.length ?? 0) - 100;
+        for (let i = messageBlocks.length - 1; i >= 1; i--) {
+          const block = messageBlocks[i]!;
+          if (remainingBudget - block.length > 0) {
+            recentBlocks.unshift(block);
+            remainingBudget -= block.length;
+          } else {
+            break;
+          }
+        }
+        if (firstBlock) {
+          parts.push(firstBlock);
+        }
+        parts.push("[Earlier context truncated...]");
+        parts.push(...recentBlocks);
+      } else {
+        parts.push(...messageBlocks);
       }
     }
 
@@ -850,6 +888,7 @@ const make = Effect.gen(function* () {
 
   const buildSendTurnRequestForThread = Effect.fnUntraced(function* (input: {
     readonly threadId: ThreadId;
+    readonly messageId?: MessageId | undefined;
     readonly messageText: string;
     readonly attachments?: ReadonlyArray<ChatAttachment>;
     readonly modelSelection?: ModelSelection;
@@ -880,6 +919,7 @@ const make = Effect.gen(function* () {
         previousProviderLabel: handoff.previousProviderLabel,
         newProviderLabel: handoff.newProviderLabel,
         messages: thread.messages,
+        currentMessageId: input.messageId,
         currentMessageText: input.messageText,
       });
       if (handoffContext.length > 0) {
@@ -1308,6 +1348,7 @@ const make = Effect.gen(function* () {
 
     const sendTurnRequest = yield* buildSendTurnRequestForThread({
       threadId: event.payload.threadId,
+      messageId: message.id,
       messageText: message.text,
       ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
       ...(event.payload.modelSelection !== undefined

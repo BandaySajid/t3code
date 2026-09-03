@@ -11,6 +11,7 @@ import type {
   RuntimeMode,
   ScopedThreadRef,
   ServerProvider,
+  ServerProviderSkill,
   ThreadId,
 } from "@t3tools/contracts";
 import {
@@ -1126,9 +1127,24 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     () => selectedProviderEntry?.snapshot ?? null,
     [selectedProviderEntry],
   );
-  const selectedProviderSkills = selectedProviderStatus
-    ? resolveProviderSkillsForCwd(selectedProviderStatus, gitCwd)
-    : [];
+  const selectedProviderSkills = useMemo(() => {
+    const directSkills = selectedProviderStatus
+      ? resolveProviderSkillsForCwd(selectedProviderStatus, gitCwd)
+      : [];
+    if (directSkills.length > 0) {
+      return directSkills;
+    }
+    const fallbackMap = new Map<string, ServerProviderSkill>();
+    for (const provider of providerStatuses) {
+      const skills = resolveProviderSkillsForCwd(provider, gitCwd);
+      for (const skill of skills) {
+        if (!fallbackMap.has(skill.name)) {
+          fallbackMap.set(skill.name, skill);
+        }
+      }
+    }
+    return Array.from(fallbackMap.values());
+  }, [selectedProviderStatus, providerStatuses, gitCwd]);
   const selectedProviderSlashCommands = selectedProviderStatus
     ? resolveProviderSlashCommandsForCwd(selectedProviderStatus, gitCwd)
     : [];
