@@ -2612,9 +2612,42 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.threadId).toBe("thread-1");
     expect(thread?.session?.providerName).toBe("claudeAgent");
     expect(thread?.session?.providerInstanceId).toBe("claudeAgent");
+    expect(thread?.modelSelection).toMatchObject({
+      instanceId: ProviderInstanceId.make("claudeAgent"),
+      model: "claude-opus-4-6",
+    });
     expect(
       thread?.activities.find((activity) => activity.kind === "provider.turn.start.failed"),
     ).toBeUndefined();
+
+    // Subsequent turn without modelSelection should continue on the switched provider
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-provider-switch-3"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-provider-switch-3"),
+          role: "user",
+          text: "third turn without modelSelection",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 3);
+    const thirdTurnInput = harness.sendTurn.mock.calls[2]?.[0] as
+      | {
+          modelSelection?: ModelSelection;
+          input?: string;
+        }
+      | undefined;
+    expect(thirdTurnInput?.input).toBe("third turn without modelSelection");
+    // Ensure it stayed with claudeAgent and did not revert to codex
+    expect(harness.startSession.mock.calls.length).toBe(2);
   });
 
   it("retries provider continuity context after a failed switched-provider turn", async () => {

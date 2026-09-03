@@ -973,6 +973,21 @@ const make = Effect.gen(function* () {
     const normalizedAttachments = input.attachments ?? [];
 
     const needsContinuityContext = threadContinuityPending.has(input.threadId);
+    if (
+      input.modelSelection !== undefined &&
+      (needsContinuityContext ||
+        input.modelSelection.instanceId !== thread.modelSelection.instanceId ||
+        input.modelSelection.model !== thread.modelSelection.model)
+    ) {
+      yield* orchestrationEngine.dispatch({
+        type: "thread.meta.update",
+        commandId: yield* serverCommandId(
+          needsContinuityContext ? "thread-model-handoff" : "thread-model-selection",
+        ),
+        threadId: input.threadId,
+        modelSelection: input.modelSelection,
+      });
+    }
     let effectiveInput = normalizedInput;
     let effectiveAttachments = normalizedAttachments;
     let continuityContextIncluded = false;
