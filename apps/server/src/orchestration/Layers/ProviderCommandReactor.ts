@@ -334,11 +334,7 @@ const make = Effect.gen(function* () {
     );
 
   const threadModelSelections = new Map<string, ModelSelection>();
-  interface ThreadHandoffPending {
-    readonly previousProviderLabel: string;
-    readonly newProviderLabel: string;
-  }
-  const threadHandoffPending = new Map<string, ThreadHandoffPending>();
+  const threadContinuityPending = new Set<string>();
 
   const appendProviderFailureActivity = (input: {
     readonly threadId: ThreadId;
@@ -618,12 +614,7 @@ const make = Effect.gen(function* () {
       (isDriverChanged || isContinuationIncompatible);
 
     if (isHandoffSwitch) {
-      threadHandoffPending.set(threadId, {
-        previousProviderLabel:
-          currentInfo.displayName ?? providerErrorLabel(String(currentInfo.driverKind)),
-        newProviderLabel:
-          desiredInfo.displayName ?? providerErrorLabel(String(desiredInfo.driverKind)),
-      });
+      threadContinuityPending.add(threadId);
     }
 
     if (
@@ -803,9 +794,7 @@ const make = Effect.gen(function* () {
     return startedSession.threadId;
   });
 
-  const formatThreadHandoffContext = (input: {
-    readonly previousProviderLabel: string;
-    readonly newProviderLabel: string;
+  const formatThreadContinuityContext = (input: {
     readonly messages: ReadonlyArray<OrchestrationMessage>;
     readonly currentMessageId?: MessageId | undefined;
     readonly currentMessageText?: string | undefined;
@@ -830,8 +819,9 @@ const make = Effect.gen(function* () {
     }
 
     const parts: string[] = [
-      `[Context Handoff: The conversation has switched from ${input.previousProviderLabel} to ${input.newProviderLabel}]`,
-      "Below is the conversation history in this thread prior to this request:",
+      "[Thread Continuity Context]",
+      "Continue this existing conversation as one continuous thread. Prior assistant messages, actions, and workspace changes are part of your own conversation history. Respond directly from that history. Do not mention internal context transfer.",
+      "Conversation before the current request:",
       "---",
     ];
 
@@ -840,7 +830,7 @@ const make = Effect.gen(function* () {
     const messageBlocks: string[] = [];
 
     for (const msg of priorMessages) {
-      const roleLabel = msg.role === "user" ? "User" : `Assistant (${input.previousProviderLabel})`;
+      const roleLabel = msg.role === "user" ? "User" : "Assistant";
       let text = assistantCitationsToPlainText(msg.text).trim();
       const attachmentNames = (msg.attachments ?? []).map((a) => a.name).filter(Boolean);
       const attachmentSummary =
@@ -881,7 +871,7 @@ const make = Effect.gen(function* () {
 
     parts.push("---");
     parts.push(
-      "Note: The repository workspace on disk already reflects all file edits and commits made by the previous agent.",
+      "Repository workspace already reflects all file edits and commits from this thread.",
     );
     return parts.join("\n");
   };
@@ -911,21 +901,18 @@ const make = Effect.gen(function* () {
     const normalizedInput = toNonEmptyProviderInput(input.messageText);
     const normalizedAttachments = input.attachments ?? [];
 
-    const handoff = threadHandoffPending.get(input.threadId);
-    threadHandoffPending.delete(input.threadId);
+    const needsContinuityContext = threadContinuityPending.delete(input.threadId);
     let effectiveInput = normalizedInput;
-    if (handoff) {
-      const handoffContext = formatThreadHandoffContext({
-        previousProviderLabel: handoff.previousProviderLabel,
-        newProviderLabel: handoff.newProviderLabel,
+    if (needsContinuityContext) {
+      const continuityContext = formatThreadContinuityContext({
         messages: thread.messages,
         currentMessageId: input.messageId,
         currentMessageText: input.messageText,
       });
-      if (handoffContext.length > 0) {
+      if (continuityContext.length > 0) {
         effectiveInput = normalizedInput
-          ? `${handoffContext}\n\nCurrent Request:\n${normalizedInput}`
-          : handoffContext;
+          ? `${continuityContext}\n\nCurrent Request:\n${normalizedInput}`
+          : continuityContext;
       }
     }
 

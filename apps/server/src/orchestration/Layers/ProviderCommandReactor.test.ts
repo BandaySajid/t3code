@@ -2492,7 +2492,7 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.runtimeMode).toBe("full-access");
   });
 
-  it("switches providers mid-thread with context handoff", async () => {
+  it("switches providers mid-thread with continuous conversation context", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
 
@@ -2516,6 +2516,26 @@ describe("ProviderCommandReactor", () => {
     await waitFor(() => harness.startSession.mock.calls.length === 1);
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
     expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({ input: "first" });
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.message.assistant.delta",
+        commandId: CommandId.make("cmd-assistant-provider-switch-1"),
+        threadId: ThreadId.make("thread-1"),
+        messageId: asMessageId("assistant-message-provider-switch-1"),
+        delta: "I found stale state in the session binding.",
+        createdAt: now,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.message.assistant.complete",
+        commandId: CommandId.make("cmd-assistant-complete-provider-switch-1"),
+        threadId: ThreadId.make("thread-1"),
+        messageId: asMessageId("assistant-message-provider-switch-1"),
+        createdAt: now,
+      }),
+    );
 
     await Effect.runPromise(
       harness.engine.dispatch({
@@ -2552,9 +2572,16 @@ describe("ProviderCommandReactor", () => {
       instanceId: ProviderInstanceId.make("claudeAgent"),
       model: "claude-opus-4-6",
     });
-    expect(secondTurnInput?.input).toContain("[Context Handoff:");
+    expect(secondTurnInput?.input).toContain("[Thread Continuity Context]");
     expect(secondTurnInput?.input).toContain("User: first");
+    expect(secondTurnInput?.input).toContain(
+      "Assistant: I found stale state in the session binding.",
+    );
     expect(secondTurnInput?.input).toContain("Current Request:\nsecond");
+    expect(secondTurnInput?.input).not.toContain("Context Handoff");
+    expect(secondTurnInput?.input).not.toContain("Codex");
+    expect(secondTurnInput?.input).not.toContain("Claude");
+    expect(secondTurnInput?.input).not.toContain("previous agent");
 
     const readModel = await harness.readModel();
     const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
